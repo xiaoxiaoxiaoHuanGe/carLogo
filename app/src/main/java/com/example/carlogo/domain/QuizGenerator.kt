@@ -15,7 +15,11 @@ import kotlin.random.Random
  */
 class QuizGenerator(private val random: Random = Random.Default) {
 
-    fun createRound(mode: QuizMode, brands: List<Brand>): List<Question> {
+    fun createRound(
+        mode: QuizMode,
+        brands: List<Brand>,
+        randomQuestionCount: Int = RandomPracticeConfig.DEFAULT_QUESTION_COUNT,
+    ): List<Question> {
         require(brands.size >= OPTION_COUNT) { "题库至少需要 4 个品牌才能生成四选一题目。" }
         require(brands.all { it.cars.isNotEmpty() }) { "每个参与出题的品牌至少需要 1 款车型。" }
 
@@ -32,11 +36,30 @@ class QuizGenerator(private val random: Random = Random.Default) {
         val uniqueTargets = targetBrands
             .flatMap { brand -> brand.cars.map { car -> brand to car } }
             .distinctBy { (brand, car) -> "${brand.displayText()}|${car.displayText()}" }
-        val questionsPerType = minOf(QUESTIONS_PER_TYPE, uniqueTargets.size)
-        val questionSpecs = (
-            uniqueTargets.shuffled(random).take(questionsPerType).map { QuestionType.BrandToModel to it } +
-                uniqueTargets.shuffled(random).take(questionsPerType).map { QuestionType.ModelToBrand to it }
-            ).shuffled(random)
+        val questionSpecs = when (mode) {
+            QuizMode.Random -> {
+                val requestedCount = RandomPracticeConfig.validateQuestionCount(randomQuestionCount)
+                val candidates = uniqueTargets.flatMap { target ->
+                    QuestionType.entries.map { type -> type to target }
+                }
+                val unusedCandidates = candidates.toMutableList()
+                List(requestedCount) {
+                    val questionType = QuestionType.entries.random(random)
+                    val typeCandidates = unusedCandidates.filter { (type, _) -> type == questionType }
+                        .ifEmpty { candidates.filter { (type, _) -> type == questionType } }
+                    val selectedCandidate = typeCandidates.random(random)
+                    unusedCandidates.remove(selectedCandidate)
+                    selectedCandidate
+                }
+            }
+            is QuizMode.BrandPractice -> {
+                val questionsPerType = minOf(QUESTIONS_PER_TYPE, uniqueTargets.size)
+                (
+                    uniqueTargets.shuffled(random).take(questionsPerType).map { QuestionType.BrandToModel to it } +
+                        uniqueTargets.shuffled(random).take(questionsPerType).map { QuestionType.ModelToBrand to it }
+                    ).shuffled(random)
+            }
+        }
 
         return questionSpecs.mapIndexed { index, (type, target) ->
             val (targetBrand, targetCar) = target

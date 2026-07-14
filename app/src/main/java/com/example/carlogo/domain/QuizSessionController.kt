@@ -11,6 +11,7 @@ data class QuizSessionState(
     val currentIndex: Int = 0,
     val answers: Map<Int, String> = emptyMap(),
     val awaitingNextAfterAnswer: Boolean = false,
+    val isResultConfirmed: Boolean = false,
 ) {
     val currentQuestion: Question get() = questions[currentIndex]
     val selectedOptionId: String? get() = answers[currentIndex]
@@ -66,6 +67,12 @@ class QuizSessionController(questions: List<Question>) {
                 currentIndex = state.currentIndex + 1,
                 awaitingNextAfterAnswer = false,
             )
+        return state
+    }
+
+    /** Lets the UI enter the result screen only after the user has seen the final answer feedback. */
+    fun confirmResult(): QuizSessionState {
+        if (state.isFinished) state = state.copy(isResultConfirmed = true)
         return state
     }
 }

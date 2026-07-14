@@ -30,17 +30,55 @@ class QuizGeneratorTest {
     }
 
     @Test
-    fun `random round contains twenty balanced four-option questions`() {
+    fun `random round defaults to ten four-option questions`() {
         val questions = QuizGenerator(Random(7)).createRound(QuizMode.Random, brands)
 
-        assertEquals(20, questions.size)
-        assertEquals(10, questions.count { it.type == QuestionType.BrandToModel })
-        assertEquals(10, questions.count { it.type == QuestionType.ModelToBrand })
+        assertEquals(10, questions.size)
         questions.forEach { question ->
             assertEquals(4, question.options.size)
             assertEquals(4, question.options.map { it.id }.distinct().size)
             assertEquals(1, question.options.count { it.isCorrect })
         }
+    }
+
+    @Test
+    fun `random round supports an odd requested count without duplicate targets`() {
+        val questions = QuizGenerator(Random(7)).createRound(
+            mode = QuizMode.Random,
+            brands = brands,
+            randomQuestionCount = 11,
+        )
+
+        assertEquals(11, questions.size)
+        assertEquals(
+            questions.size,
+            questions.map { "${it.type}|${it.targetBrandId}|${it.targetCarId}" }.distinct().size,
+        )
+    }
+
+    @Test
+    fun `random round supports the configured maximum`() {
+        val questions = QuizGenerator(Random(9)).createRound(
+            mode = QuizMode.Random,
+            brands = brands,
+            randomQuestionCount = 50,
+        )
+
+        assertEquals(50, questions.size)
+        assertTrue(questions.all { question ->
+            question.options.size == 4 && question.options.count { option -> option.isCorrect } == 1
+        })
+    }
+
+    @Test
+    fun `random round does not force a balanced question type split`() {
+        val questions = QuizGenerator(ZeroRandom()).createRound(
+            mode = QuizMode.Random,
+            brands = brands,
+            randomQuestionCount = 50,
+        )
+
+        assertEquals(50, questions.count { it.type == QuestionType.BrandToModel })
     }
 
     @Test
@@ -96,5 +134,9 @@ class QuizGeneratorTest {
 
         assertEquals(uniquenessKeys.size, uniquenessKeys.distinct().size)
         assertEquals(4, questions.size)
+    }
+
+    private class ZeroRandom : Random() {
+        override fun nextBits(bitCount: Int) = 0
     }
 }

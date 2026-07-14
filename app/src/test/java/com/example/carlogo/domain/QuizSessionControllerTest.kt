@@ -33,6 +33,22 @@ class QuizSessionControllerTest {
     }
 
     @Test
+    fun `final answer waits for explicit result confirmation`() {
+        val controller = QuizSessionController(listOf(question("q1", true), question("q2", true)))
+
+        controller.answer("correct-q1")
+        controller.next()
+        val finalAnswer = controller.answer("correct-q2")
+
+        assertTrue(finalAnswer.isFinished)
+        assertFalse(finalAnswer.isResultConfirmed)
+
+        val confirmed = controller.confirmResult()
+
+        assertTrue(confirmed.isResultConfirmed)
+    }
+
+    @Test
     fun `review navigation can return to the next unanswered question`() {
         val controller = QuizSessionController(listOf(question("q1", true), question("q2", true), question("q3", true)))
 

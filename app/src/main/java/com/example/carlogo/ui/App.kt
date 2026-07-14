@@ -1,8 +1,7 @@
 package com.example.carlogo.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Context
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,6 +9,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -44,6 +45,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -72,6 +75,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.window.Dialog
 import androidx.room.Room
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.carlogo.R
 import com.example.carlogo.data.CarRepository
 import com.example.carlogo.data.SeedData
@@ -82,6 +87,7 @@ import com.example.carlogo.domain.QuizGenerator
 import com.example.carlogo.domain.QuizAnswerTransition
 import com.example.carlogo.domain.QuizSessionController
 import com.example.carlogo.domain.QuizSessionState
+import com.example.carlogo.domain.RandomPracticeConfig
 import com.example.carlogo.domain.model.Brand
 import com.example.carlogo.domain.model.CarModel
 import com.example.carlogo.domain.model.QuestionType
@@ -98,18 +104,49 @@ import com.example.carlogo.ui.theme.MistWhite
 import com.example.carlogo.ui.theme.NightSky
 import com.example.carlogo.ui.theme.SoftBlue
 import com.example.carlogo.ui.theme.SuccessMint
-import java.io.File
-import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 private val AppGradient = Brush.verticalGradient(listOf(NightSky, DeepNavy, NightSky))
 private val CardGradient = Brush.linearGradient(listOf(CardNavyLight, CardNavy))
 private val HeroGradient = Brush.linearGradient(listOf(ElectricBlue, Color(0xFF0750CC)))
+private const val RANDOM_PRACTICE_SETTINGS = "random_practice_settings"
+private const val RANDOM_PRACTICE_QUESTION_COUNT_KEY = "question_count"
+
+internal object SpecialBrandLogoPresentation {
+    const val TILE_SIZE_DP = 64
+    const val TILE_CORNER_RADIUS_DP = 14
+    const val TILE_PADDING_DP = 8
+}
+
+internal object SpecialBrandCardPresentation {
+    const val INFO_ROW_HEIGHT_DP = 64
+    const val INFO_MAX_LINES = 2
+    const val BRAND_NAME_MAX_LINES = 4
+}
+
+internal object ManagementBrandLogoPresentation {
+    const val TILE_SIZE_DP = 48
+    const val TILE_CORNER_RADIUS_DP = 14
+    const val TILE_PADDING_DP = 6
+    const val CARD_HEIGHT_DP = 78
+    const val BRAND_NAME_MAX_LINES = 1
+}
 
 @Composable
 fun CarLogoApp() {
     val context = LocalContext.current
+    val randomPracticePreferences = remember(context) {
+        context.getSharedPreferences(RANDOM_PRACTICE_SETTINGS, Context.MODE_PRIVATE)
+    }
+    var randomQuestionCount by remember {
+        mutableStateOf(
+            randomPracticePreferences
+                .getInt(RANDOM_PRACTICE_QUESTION_COUNT_KEY, RandomPracticeConfig.DEFAULT_QUESTION_COUNT)
+                .coerceIn(RandomPracticeConfig.MIN_QUESTION_COUNT, RandomPracticeConfig.MAX_QUESTION_COUNT),
+        )
+    }
     val repository = remember {
         CarRepository(
             Room.databaseBuilder(context, AppDatabase::class.java, "car_logo.db")
@@ -134,7 +171,10 @@ fun CarLogoApp() {
     val startRound: (QuizMode) -> Unit = { mode ->
         scope.launch {
             runCatching {
-                val questions = QuizGenerator().createRound(mode, brands)
+                val questions = when (mode) {
+                    QuizMode.Random -> QuizGenerator().createRound(mode, brands, randomQuestionCount)
+                    is QuizMode.BrandPractice -> QuizGenerator().createRound(mode, brands)
+                }
                 questions to repository.startSession(
                     mode.javaClass.simpleName,
                     (mode as? QuizMode.BrandPractice)?.brandId,
@@ -151,7 +191,7 @@ fun CarLogoApp() {
 
     val activeState = sessionState
     when {
-        activeState != null && !activeState.isFinished -> QuizScreen(
+        activeState != null && !activeState.isResultConfirmed -> QuizScreen(
             state = activeState,
             onBack = { controller = null; sessionState = null; sessionId = null },
             onAnswer = { optionId ->
@@ -166,12 +206,16 @@ fun CarLogoApp() {
             onNext = {
                 val next = controller?.next()
                 sessionState = next
-                if (next?.isFinished == true && sessionId != null) scope.launch {
-                    repository.finishSession(sessionId!!, next.correctCount)
+            },
+            onShowResult = {
+                val completed = controller?.confirmResult()
+                sessionState = completed
+                if (completed?.isResultConfirmed == true && sessionId != null) scope.launch {
+                    repository.finishSession(sessionId!!, completed.correctCount)
                 }
             },
         )
-        activeState?.isFinished == true -> ResultScreen(activeState) {
+        activeState?.isResultConfirmed == true -> ResultScreen(activeState) {
             controller = null; sessionState = null; sessionId = null
         }
         else -> MainShell(
@@ -179,6 +223,14 @@ fun CarLogoApp() {
             brands = brands,
             error = errorMessage,
             onStart = startRound,
+            randomQuestionCount = randomQuestionCount,
+            onRandomQuestionCountChanged = { questionCount ->
+                val validQuestionCount = RandomPracticeConfig.validateQuestionCount(questionCount)
+                randomQuestionCount = validQuestionCount
+                randomPracticePreferences.edit()
+                    .putInt(RANDOM_PRACTICE_QUESTION_COUNT_KEY, validQuestionCount)
+                    .apply()
+            },
             repository = repository,
             onBrandsChanged = { brands = repository.loadBrands() },
             onOpenPage = { page = it },
@@ -192,6 +244,8 @@ private fun MainShell(
     brands: List<Brand>,
     error: String?,
     onStart: (QuizMode) -> Unit,
+    randomQuestionCount: Int,
+    onRandomQuestionCountChanged: (Int) -> Unit,
     repository: CarRepository,
     onBrandsChanged: suspend () -> Unit,
     onOpenPage: (String) -> Unit,
@@ -211,7 +265,15 @@ private fun MainShell(
             },
         ) { insets ->
             when (page) {
-                "random" -> RandomPracticePage(brands.isNotEmpty(), error, { onStart(QuizMode.Random) }, onOpenPage, insets)
+                "random" -> RandomPracticePage(
+                    enabled = brands.isNotEmpty(),
+                    error = error,
+                    questionCount = randomQuestionCount,
+                    onStart = { onStart(QuizMode.Random) },
+                    onQuestionCountChanged = onRandomQuestionCountChanged,
+                    onOpenPage = onOpenPage,
+                    insets = insets,
+                )
                 "special" -> BrandPracticePage(brands, onStart, insets)
                 "history" -> RecordsScreen("学习记录", insets, { onOpenPage("settings") }) { repository.history() }
                 "mistakes" -> MistakesScreen(insets, { onOpenPage("settings") }) { repository.mistakes() }
@@ -265,7 +327,17 @@ private fun RowScope.TechNavItem(label: String, symbol: String, selected: Boolea
 }
 
 @Composable
-private fun RandomPracticePage(enabled: Boolean, error: String?, onStart: () -> Unit, onOpenPage: (String) -> Unit, insets: PaddingValues) {
+private fun RandomPracticePage(
+    enabled: Boolean,
+    error: String?,
+    questionCount: Int,
+    onStart: () -> Unit,
+    onQuestionCountChanged: (Int) -> Unit,
+    onOpenPage: (String) -> Unit,
+    insets: PaddingValues,
+) {
+    var showQuestionCountSettings by remember { mutableStateOf(false) }
+    var pendingQuestionCount by remember(questionCount) { mutableStateOf(questionCount) }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 20.dp),
         contentPadding = PaddingValues(top = 28.dp, bottom = 24.dp),
@@ -290,11 +362,27 @@ private fun RandomPracticePage(enabled: Boolean, error: String?, onStart: () -> 
                     Column(Modifier.padding(24.dp)) {
                         Text("随机练习", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MistWhite)
                         Row(verticalAlignment = Alignment.Bottom) {
-                            Text("20", style = MaterialTheme.typography.displayLarge, color = CyanGlow, fontWeight = FontWeight.Black)
+                            Text("$questionCount", style = MaterialTheme.typography.displayLarge, color = CyanGlow, fontWeight = FontWeight.Black)
                             Text(" 题", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MistWhite, modifier = Modifier.padding(bottom = 12.dp))
                         }
                     }
-                    TechButton("开始练习", onStart, enabled, Modifier.align(Alignment.BottomCenter).padding(20.dp).fillMaxWidth())
+                    Row(
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Button(
+                            onClick = {
+                                pendingQuestionCount = questionCount
+                                showQuestionCountSettings = true
+                            },
+                            modifier = Modifier.height(56.dp),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = CardNavyLight, contentColor = CyanGlow),
+                        ) {
+                            Text("设置", fontWeight = FontWeight.Bold)
+                        }
+                        TechButton("开始练习", onStart, enabled, Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -305,6 +393,38 @@ private fun RandomPracticePage(enabled: Boolean, error: String?, onStart: () -> 
             }
         }
         if (error != null) item { Text(error, color = ErrorPink) }
+    }
+
+    if (showQuestionCountSettings) {
+        Dialog(onDismissRequest = { showQuestionCountSettings = false }) {
+            TechCard(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text("随机练习题数", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, color = MistWhite)
+                    Text("$pendingQuestionCount 题", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = CyanGlow)
+                    Slider(
+                        value = pendingQuestionCount.toFloat(),
+                        onValueChange = { pendingQuestionCount = it.roundToInt() },
+                        valueRange = RandomPracticeConfig.MIN_QUESTION_COUNT.toFloat()..RandomPracticeConfig.MAX_QUESTION_COUNT.toFloat(),
+                        steps = RandomPracticeConfig.MAX_QUESTION_COUNT - RandomPracticeConfig.MIN_QUESTION_COUNT - 1,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { showQuestionCountSettings = false },
+                            modifier = Modifier.weight(1f).height(52.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = CardNavyLight, contentColor = MistWhite),
+                        ) { Text("取消") }
+                        Button(
+                            onClick = {
+                                onQuestionCountChanged(pendingQuestionCount)
+                                showQuestionCountSettings = false
+                            },
+                            modifier = Modifier.weight(1f).height(52.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue, contentColor = MistWhite),
+                        ) { Text("保存") }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -341,42 +461,82 @@ private fun ShortcutCard(title: String, symbol: String, modifier: Modifier, onCl
 private fun BrandPracticePage(brands: List<Brand>, onStart: (QuizMode) -> Unit, insets: PaddingValues) {
     var query by remember { mutableStateOf("") }
     var categoryExpanded by remember { mutableStateOf(false) }
+    val brandNameTextMeasurer = rememberTextMeasurer(cacheSize = 256)
     val categories = (SeedData.categoryOrder + brands.map { it.category }.distinct().filter { it !in SeedData.categoryOrder })
         .filter { category -> brands.any { it.category == category } }
-    var selectedCategory by remember { mutableStateOf(SeedData.categoryOrder.first()) }
-    val filtered = brands.filter {
-        it.category == selectedCategory && (it.nameZh.contains(query, true) || it.nameEn.contains(query, true))
-    }
+    var selectedCategory by remember { mutableStateOf<String?>(null) }
+    val filtered = filterPracticeBrands(brands, selectedCategory, query)
     Column(Modifier.fillMaxSize().padding(insets).padding(horizontal = 20.dp)) {
         Spacer(Modifier.height(28.dp))
         Text("品牌专项", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MistWhite)
-        Text("选择品牌，开始针对练习", color = SoftBlue, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp, bottom = 18.dp))
-        Box(Modifier.fillMaxWidth()) {
-            Button(
-                onClick = { categoryExpanded = true },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = CardNavyLight, contentColor = MistWhite),
-            ) {
-                Text("$selectedCategory  ·  选择分类")
-            }
-            DropdownMenu(expanded = categoryExpanded, onDismissRequest = { categoryExpanded = false }) {
-                categories.forEach { category ->
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                SpecialBrandFilterPresentation.SUBTITLE_LABEL,
+                color = SoftBlue,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "${SpecialBrandFilterPresentation.CURRENT_FILTER_PREFIX}${selectedCategory ?: ALL_BRANDS_FILTER_LABEL}",
+                color = CyanGlow,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.End,
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.weight(SpecialBrandFilterPresentation.FILTER_WEIGHT)) {
+                Button(
+                    onClick = { categoryExpanded = true },
+                    modifier = Modifier.fillMaxWidth().height(SpecialBrandFilterPresentation.CONTROL_HEIGHT_DP.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = CardNavyLight, contentColor = MistWhite),
+                ) {
+                    Text(SpecialBrandFilterPresentation.BUTTON_LABEL)
+                }
+                DropdownMenu(
+                    expanded = categoryExpanded,
+                    onDismissRequest = { categoryExpanded = false },
+                    modifier = Modifier.widthIn(min = SpecialBrandFilterPresentation.MENU_MIN_WIDTH_DP.dp),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                    containerColor = CardNavy,
+                    border = BorderStroke(1.dp, SoftBlue),
+                ) {
                     DropdownMenuItem(
-                        text = { Text(category) },
-                        onClick = { selectedCategory = category; categoryExpanded = false },
+                        text = { Text(ALL_BRANDS_FILTER_LABEL) },
+                        onClick = { selectedCategory = null; categoryExpanded = false },
+                        modifier = Modifier.background(
+                            if (selectedCategory == null) ElectricBlue else Color.Transparent,
+                            androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                        ),
                     )
+                    categories.forEach { category ->
+                        DropdownMenuItem(
+                            text = { Text(category) },
+                            onClick = { selectedCategory = category; categoryExpanded = false },
+                            modifier = Modifier.background(
+                                if (selectedCategory == category) ElectricBlue else Color.Transparent,
+                                androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                            ),
+                        )
+                    }
                 }
             }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier
+                    .weight(SpecialBrandFilterPresentation.SEARCH_WEIGHT)
+                    .height(SpecialBrandFilterPresentation.CONTROL_HEIGHT_DP.dp),
+                singleLine = true,
+                label = { Text("搜索品牌") },
+                leadingIcon = { Text("⌕", style = MaterialTheme.typography.headlineSmall) },
+            )
         }
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("搜索品牌") },
-            leadingIcon = { Text("⌕", style = MaterialTheme.typography.headlineSmall) },
-        )
         Spacer(Modifier.height(16.dp))
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
@@ -384,29 +544,138 @@ private fun BrandPracticePage(brands: List<Brand>, onStart: (QuizMode) -> Unit, 
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            items(filtered) { brand -> BrandCard(brand) { onStart(QuizMode.BrandPractice(brand.id)) } }
+            items(filtered, key = { brand -> brand.id }) { brand ->
+                BrandCard(brand, brandNameTextMeasurer) { onStart(QuizMode.BrandPractice(brand.id)) }
+            }
         }
     }
 }
 
 @Composable
-private fun BrandCard(brand: Brand, onClick: () -> Unit) {
-    TechCard(Modifier.clickable(onClick = onClick)) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            BrandMark(brand, Modifier.size(72.dp))
-            Text(brand.displayText(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text("${brand.cars.size} 款车型 · ${brand.category}", color = SoftBlue, style = MaterialTheme.typography.labelMedium)
+private fun BrandCard(brand: Brand, textMeasurer: TextMeasurer, onClick: () -> Unit) {
+    TechCard(Modifier.fillMaxWidth().height(180.dp).clickable(onClick = onClick)) {
+        Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().height(SpecialBrandCardPresentation.INFO_ROW_HEIGHT_DP.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SpecialBrandLogo(brand, Modifier.size(SpecialBrandLogoPresentation.TILE_SIZE_DP.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "${brand.cars.size} 款车型 · ${brand.category}",
+                    color = SoftBlue,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                    maxLines = SpecialBrandCardPresentation.INFO_MAX_LINES,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            AutoFitBrandName(
+                text = brand.displayText(),
+                textMeasurer = textMeasurer,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
         }
     }
 }
 
 @Composable
-private fun BrandMark(brand: Brand, modifier: Modifier = Modifier) {
+private fun AutoFitBrandName(text: String, textMeasurer: TextMeasurer, modifier: Modifier = Modifier) {
+    val baseStyle = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+    val density = LocalDensity.current
+
+    BoxWithConstraints(modifier) {
+        val maxWidthPx = with(density) { maxWidth.roundToPx() }
+        val maxHeightPx = with(density) { maxHeight.roundToPx() }
+        val scale = remember(text, baseStyle, maxWidthPx, maxHeightPx, textMeasurer) {
+            BrandNameAutoFit.selectLargestFittingScale { scale ->
+                val candidateStyle = baseStyle.copy(
+                    fontSize = baseStyle.fontSize * scale,
+                    lineHeight = baseStyle.lineHeight * scale,
+                )
+                val layout = textMeasurer.measure(
+                    text = AnnotatedString(text),
+                    style = candidateStyle,
+                    maxLines = SpecialBrandCardPresentation.BRAND_NAME_MAX_LINES,
+                    overflow = TextOverflow.Clip,
+                    constraints = Constraints(maxWidth = maxWidthPx, maxHeight = maxHeightPx),
+                )
+                !layout.hasVisualOverflow
+            } ?: BrandNameAutoFit.candidateScales.last()
+        }
+        Text(
+            text = text,
+            style = baseStyle.copy(
+                fontSize = baseStyle.fontSize * scale,
+                lineHeight = baseStyle.lineHeight * scale,
+            ),
+            color = MistWhite,
+            maxLines = SpecialBrandCardPresentation.BRAND_NAME_MAX_LINES,
+            overflow = TextOverflow.Clip,
+        )
+    }
+}
+
+@Composable
+private fun SpecialBrandLogo(brand: Brand, modifier: Modifier = Modifier) {
+    BrandLogoTile(
+        brand = brand,
+        modifier = modifier,
+        tileSizeDp = SpecialBrandLogoPresentation.TILE_SIZE_DP,
+        cornerRadiusDp = SpecialBrandLogoPresentation.TILE_CORNER_RADIUS_DP,
+        paddingDp = SpecialBrandLogoPresentation.TILE_PADDING_DP,
+    )
+}
+
+@Composable
+private fun ManagementBrandLogo(brand: Brand, modifier: Modifier = Modifier) {
+    BrandLogoTile(
+        brand = brand,
+        modifier = modifier,
+        tileSizeDp = ManagementBrandLogoPresentation.TILE_SIZE_DP,
+        cornerRadiusDp = ManagementBrandLogoPresentation.TILE_CORNER_RADIUS_DP,
+        paddingDp = ManagementBrandLogoPresentation.TILE_PADDING_DP,
+    )
+}
+
+@Composable
+private fun BrandLogoTile(
+    brand: Brand,
+    modifier: Modifier,
+    tileSizeDp: Int,
+    cornerRadiusDp: Int,
+    paddingDp: Int,
+) {
     Box(
-        modifier = modifier.clip(androidx.compose.foundation.shape.CircleShape).background(HeroGradient).border(1.dp, CyanGlow.copy(alpha = 0.8f), androidx.compose.foundation.shape.CircleShape),
+        modifier = modifier
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(cornerRadiusDp.dp))
+            .background(MistWhite)
+            .border(1.dp, SoftBlue.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(cornerRadiusDp.dp)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(brand.nameEn.take(2).uppercase(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MistWhite)
+        val logoResourceId = BrandLogoRegistry.resourceIdFor(brand.id)
+        if (logoResourceId != null) {
+            val context = LocalContext.current
+            val density = LocalDensity.current
+            val decodeSizePx = with(density) {
+                (tileSizeDp.dp - (paddingDp * 2).dp).roundToPx().coerceAtLeast(1)
+            }
+            val imageRequest = remember(context, logoResourceId, decodeSizePx) {
+                ImageRequest.Builder(context)
+                    .data(logoResourceId)
+                    .size(decodeSizePx)
+                    .crossfade(false)
+                    .build()
+            }
+            AsyncImage(
+                model = imageRequest,
+                contentDescription = "${brand.displayText()} 品牌图标",
+                modifier = Modifier.fillMaxSize().padding(paddingDp.dp),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Text(brand.nameEn.take(2).uppercase(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = CardNavy)
+        }
     }
 }
 
@@ -537,14 +806,29 @@ private fun ManagementScreen(
             )
         }
         item { Text("品牌列表（${filteredBrands.size}）", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite) }
-        items(filteredBrands.size) { index ->
+        items(filteredBrands.size, key = { index -> filteredBrands[index].id }) { index ->
             val brand = filteredBrands[index]
-            TechCard(Modifier.fillMaxWidth().clickable { onOpenBrandDetail(brand.id) }) {
-                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BrandMark(brand, Modifier.size(42.dp))
+            TechCard(
+                Modifier
+                    .fillMaxWidth()
+                    .height(ManagementBrandLogoPresentation.CARD_HEIGHT_DP.dp)
+                    .clickable { onOpenBrandDetail(brand.id) },
+            ) {
+                Row(
+                    Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ManagementBrandLogo(brand, Modifier.size(ManagementBrandLogoPresentation.TILE_SIZE_DP.dp))
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(brand.displayText(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite)
+                        Text(
+                            brand.displayText(),
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MistWhite,
+                            maxLines = ManagementBrandLogoPresentation.BRAND_NAME_MAX_LINES,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         Text("${brand.cars.size} 款车型 · 点击管理", color = SoftBlue, style = MaterialTheme.typography.bodySmall)
                     }
                     if (!brand.isBuiltIn) {
@@ -572,16 +856,10 @@ private fun BrandDetailManagementScreen(
     var editingCar by remember { mutableStateOf<CarModel?>(null) }
     var carZh by remember { mutableStateOf("") }
     var carEn by remember { mutableStateOf("") }
-    var imageRef by remember { mutableStateOf<String?>(null) }
-    val context = LocalContext.current
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        imageRef = uri?.let { copyImageToPrivateStorage(context, it.toString()) }
-    }
     fun openEditor(car: CarModel? = null) {
         editingCar = car
         carZh = car?.nameZh.orEmpty()
         carEn = car?.nameEn.orEmpty()
-        imageRef = car?.imageRef
         showEditor = true
     }
 
@@ -590,7 +868,7 @@ private fun BrandDetailManagementScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             BackButton(onBack)
             Spacer(Modifier.width(12.dp))
-            BrandMark(brand, Modifier.size(42.dp))
+            ManagementBrandLogo(brand, Modifier.size(ManagementBrandLogoPresentation.TILE_SIZE_DP.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(brand.displayText(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MistWhite)
@@ -628,10 +906,9 @@ private fun BrandDetailManagementScreen(
                     Text(brand.displayText(), color = SoftBlue)
                     OutlinedTextField(carZh, { carZh = it }, label = { Text("车型中文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                     OutlinedTextField(carEn, { carEn = it }, label = { Text("车型英文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    TechButton(if (imageRef == null) "从相册选择车型图片" else "已选择车型图片", { picker.launch("image/*") }, true, Modifier.fillMaxWidth())
                     TechButton(if (editingCar == null) "保存车型" else "保存修改", {
-                        if (editingCar == null) onAddCar(brand.id, carZh, carEn, imageRef)
-                        else onUpdateCar(editingCar!!.id, brand.id, carZh, carEn, imageRef)
+                        if (editingCar == null) onAddCar(brand.id, carZh, carEn, null)
+                        else onUpdateCar(editingCar!!.id, brand.id, carZh, carEn, editingCar!!.imageRef)
                         showEditor = false
                     }, carZh.isNotBlank(), Modifier.fillMaxWidth())
                     Text("取消", color = SoftBlue, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().clickable { showEditor = false }.padding(8.dp))
@@ -641,13 +918,6 @@ private fun BrandDetailManagementScreen(
     }
 }
 
-private fun copyImageToPrivateStorage(context: android.content.Context, uri: String): String? = runCatching {
-    val targetDir = File(context.filesDir, "car_images").apply { mkdirs() }
-    val target = File(targetDir, "${UUID.randomUUID()}.jpg")
-    context.contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { input -> target.outputStream().use(input::copyTo) }
-    target.absolutePath
-}.getOrNull()
-
 @Composable
 private fun QuizScreen(
     state: QuizSessionState,
@@ -655,6 +925,7 @@ private fun QuizScreen(
     onAnswer: (String) -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onShowResult: () -> Unit,
 ) {
     val question = state.currentQuestion
     val selectedOptionIsCorrect = question.options.firstOrNull { it.id == state.selectedOptionId }?.isCorrect == true
@@ -714,13 +985,15 @@ private fun QuizScreen(
             items(question.options.size) { index -> QuizOptionCard(question.options[index].letteredText(index), state.selectedOptionId == question.options[index].id, question.options[index].isCorrect, state.isAnswered, state.canSelect) { onAnswer(question.options[index].id) } }
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (state.hasPreviousQuestion) {
-                        TechButton("上一题", onPrevious, state.canGoPrevious, Modifier.weight(1f))
-                    } else {
-                        Spacer(Modifier.weight(1f))
-                    }
                     if (state.hasNextQuestion) {
+                        if (state.hasPreviousQuestion) {
+                            TechButton("上一题", onPrevious, state.canGoPrevious, Modifier.weight(1f))
+                        } else {
+                            Spacer(Modifier.weight(1f))
+                        }
                         TechButton("下一题", onNext, state.canGoNext, Modifier.weight(1f))
+                    } else {
+                        TechButton("查看评分", onShowResult, state.isFinished, Modifier.fillMaxWidth())
                     }
                 }
             }
