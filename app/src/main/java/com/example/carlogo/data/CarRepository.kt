@@ -7,8 +7,14 @@ import com.example.carlogo.data.local.BrandEntity
 import com.example.carlogo.data.local.CarEntity
 import com.example.carlogo.data.local.MistakeEntity
 import com.example.carlogo.data.local.QuizSessionEntity
+import com.example.carlogo.domain.CompletedLearningSession
+import com.example.carlogo.domain.LearningOverview
 import com.example.carlogo.domain.model.Brand
 import com.example.carlogo.domain.model.CarModel
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.TemporalAdjusters
 import java.util.UUID
 
 class CarRepository(private val database: AppDatabase) {
@@ -65,7 +71,35 @@ class CarRepository(private val database: AppDatabase) {
 
     suspend fun finishSession(sessionId: Long, correctCount: Int) = database.quizDao().finishSession(sessionId, correctCount, System.currentTimeMillis())
 
-    suspend fun history() = database.quizDao().getHistory()
+    suspend fun history() = database.quizDao().getCompletedHistory()
+
+    suspend fun todayCompletedQuestionCount(): Int {
+        val zoneId = ZoneId.systemDefault()
+        val today = LocalDate.now(zoneId)
+        val dayStartMillis = today.atStartOfDay(zoneId).toInstant().toEpochMilli()
+        val nextDayStartMillis = today.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli()
+        return database.quizDao().completedQuestionCountBetween(dayStartMillis, nextDayStartMillis)
+    }
+
+    suspend fun learningOverview(): LearningOverview {
+        val zoneId = ZoneId.systemDefault()
+        val currentWeekStart = LocalDate.now(zoneId)
+            .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+            .atStartOfDay(zoneId)
+            .toInstant()
+            .toEpochMilli()
+        return LearningOverview.fromCompletedSessions(
+            sessions = database.quizDao().getCompletedHistory().map { session ->
+                CompletedLearningSession(
+                    totalQuestionCount = session.totalCount,
+                    correctQuestionCount = session.correctCount,
+                    finishedAtMillis = requireNotNull(session.finishedAt),
+                )
+            },
+            weekStartMillis = currentWeekStart,
+            pendingMistakeCount = database.quizDao().getMistakes().size,
+        )
+    }
 
     suspend fun mistakes() = database.quizDao().getMistakes()
 

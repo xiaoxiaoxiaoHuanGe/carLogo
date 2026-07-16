@@ -26,11 +26,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -38,6 +40,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -83,6 +86,12 @@ import com.example.carlogo.data.SeedData
 import com.example.carlogo.data.local.AppDatabase
 import com.example.carlogo.data.local.MistakeEntity
 import com.example.carlogo.data.local.QuizSessionEntity
+import com.example.carlogo.domain.CompletedPracticeSession
+import com.example.carlogo.domain.DailyGoalProgress
+import com.example.carlogo.domain.HeatLevel
+import com.example.carlogo.domain.LearningDaySummary
+import com.example.carlogo.domain.LearningHistory
+import com.example.carlogo.domain.LearningOverview
 import com.example.carlogo.domain.QuizGenerator
 import com.example.carlogo.domain.QuizAnswerTransition
 import com.example.carlogo.domain.QuizSessionController
@@ -106,6 +115,10 @@ import com.example.carlogo.ui.theme.SoftBlue
 import com.example.carlogo.ui.theme.SuccessMint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 
 private val AppGradient = Brush.verticalGradient(listOf(NightSky, DeepNavy, NightSky))
@@ -209,9 +222,15 @@ fun CarLogoApp() {
             },
             onShowResult = {
                 val completed = controller?.confirmResult()
-                sessionState = completed
-                if (completed?.isResultConfirmed == true && sessionId != null) scope.launch {
-                    repository.finishSession(sessionId!!, completed.correctCount)
+                val completedSessionId = sessionId
+                if (completed?.isResultConfirmed == true && completedSessionId != null) {
+                    scope.launch {
+                        runCatching { repository.finishSession(completedSessionId, completed.correctCount) }
+                            .onFailure { errorMessage = it.message ?: "无法保存练习记录" }
+                        sessionState = completed
+                    }
+                } else {
+                    sessionState = completed
                 }
             },
         )
@@ -252,7 +271,16 @@ private fun MainShell(
 ) {
     val scope = rememberCoroutineScope()
     var managingBrandId by remember { mutableStateOf<String?>(null) }
+    var selectedMistake by remember { mutableStateOf<MistakePresentation?>(null) }
+    var dailyGoalProgress by remember { mutableStateOf(DailyGoalProgress.fromCompletedQuestionCount(0)) }
+    var mistakeReviewShortcut by remember { mutableStateOf(MistakeReviewShortcutPresentation.fromPendingMistakeCount(0)) }
     val selectedTab = if (page in listOf("random", "special", "settings")) page else "settings"
+    LaunchedEffect(page) {
+        if (page == "random") {
+            dailyGoalProgress = DailyGoalProgress.fromCompletedQuestionCount(repository.todayCompletedQuestionCount())
+            mistakeReviewShortcut = MistakeReviewShortcutPresentation.fromPendingMistakeCount(repository.mistakes().size)
+        }
+    }
     Box(Modifier.fillMaxSize().background(AppGradient)) {
         Scaffold(
             containerColor = Color.Transparent,
@@ -269,6 +297,9 @@ private fun MainShell(
                     enabled = brands.isNotEmpty(),
                     error = error,
                     questionCount = randomQuestionCount,
+                    dailyGoalProgress = dailyGoalProgress,
+                    brands = brands,
+                    mistakeReviewShortcut = mistakeReviewShortcut,
                     onStart = { onStart(QuizMode.Random) },
                     onQuestionCountChanged = onRandomQuestionCountChanged,
                     onOpenPage = onOpenPage,
@@ -276,7 +307,26 @@ private fun MainShell(
                 )
                 "special" -> BrandPracticePage(brands, onStart, insets)
                 "history" -> RecordsScreen("学习记录", insets, { onOpenPage("settings") }) { repository.history() }
-                "mistakes" -> MistakesScreen(insets, { onOpenPage("settings") }) { repository.mistakes() }
+                "mistakes" -> MistakesScreen(
+                    brands = brands,
+                    insets = insets,
+                    onBack = { onOpenPage("settings") },
+                    load = { repository.mistakes() },
+                    onOpenDetail = { mistake ->
+                        selectedMistake = mistake
+                        onOpenPage("mistakeDetail")
+                    },
+                )
+                "mistakeDetail" -> {
+                    val mistake = selectedMistake
+                    if (mistake != null) {
+                        MistakeDetailScreen(mistake, brands, insets) { onOpenPage("mistakes") }
+                    } else {
+                        TechListPage("错题详情", insets, { onOpenPage("mistakes") }) {
+                            item { EmptyCard("未找到这道错题，请返回错题本重新选择。") }
+                        }
+                    }
+                }
                 "manage" -> ManagementScreen(
                     brands = brands,
                     insets = insets,
@@ -303,7 +353,7 @@ private fun MainShell(
                         }
                     }
                 }
-                else -> SettingsPage(insets, onOpenPage)
+                else -> SettingsPage(insets, onOpenPage, repository)
             }
         }
     }
@@ -331,6 +381,9 @@ private fun RandomPracticePage(
     enabled: Boolean,
     error: String?,
     questionCount: Int,
+    dailyGoalProgress: DailyGoalProgress,
+    brands: List<Brand>,
+    mistakeReviewShortcut: MistakeReviewShortcutPresentation,
     onStart: () -> Unit,
     onQuestionCountChanged: (Int) -> Unit,
     onOpenPage: (String) -> Unit,
@@ -349,7 +402,7 @@ private fun RandomPracticePage(
                 Box(Modifier.padding(top = 12.dp).width(78.dp).height(5.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(20.dp)).background(ElectricBlue))
             }
         }
-        item { LearningProgressCard() }
+        item { LearningProgressCard(dailyGoalProgress) }
         item {
             TechCard {
                 Box {
@@ -387,9 +440,9 @@ private fun RandomPracticePage(
             }
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                ShortcutCard("品牌专项", "▱", Modifier.weight(1f)) { onOpenPage("special") }
-                ShortcutCard("错题复盘", "▧", Modifier.weight(1f)) { onOpenPage("mistakes") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                BrandPracticeShortcutCard(brands, Modifier.weight(1f)) { onOpenPage("special") }
+                MistakeReviewShortcutCard(mistakeReviewShortcut, Modifier.weight(1f)) { onOpenPage("mistakes") }
             }
         }
         if (error != null) item { Text(error, color = ErrorPink) }
@@ -429,29 +482,160 @@ private fun RandomPracticePage(
 }
 
 @Composable
-private fun LearningProgressCard() {
+private fun LearningProgressCard(dailyGoalProgress: DailyGoalProgress) {
     TechCard {
         Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row { Text("连续学习 ", style = MaterialTheme.typography.titleLarge); Text("7", style = MaterialTheme.typography.headlineLarge, color = ElectricBlue, fontWeight = FontWeight.Black); Text(" 天", style = MaterialTheme.typography.titleLarge) }
-                Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    repeat(7) { index -> Text(if (index < 6) "●" else "○", color = if (index < 6) ElectricBlue else SoftBlue, style = MaterialTheme.typography.titleMedium) }
-                }
+                Text("今日目标", style = MaterialTheme.typography.titleLarge, color = MistWhite, fontWeight = FontWeight.Bold)
+                Text(
+                    "已完成 ${dailyGoalProgress.completedQuestionCount}/${dailyGoalProgress.goalQuestionCount} 题",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = ElectricBlue,
+                    fontWeight = FontWeight.Black,
+                )
+                Text(
+                    if (dailyGoalProgress.isCompleted) "今日目标已完成" else "还差 ${dailyGoalProgress.remainingQuestionCount} 题",
+                    color = if (dailyGoalProgress.isCompleted) SuccessMint else SoftBlue,
+                )
             }
-            Box(Modifier.size(82.dp).border(7.dp, CyanGlow, androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
-                Text("68%", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+            Box(Modifier.size(82.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    progress = { dailyGoalProgress.progress },
+                    modifier = Modifier.fillMaxSize(),
+                    color = CyanGlow,
+                    trackColor = CardNavyLight,
+                    strokeWidth = 7.dp,
+                )
+                Text(
+                    "${dailyGoalProgress.completedQuestionCount}/${dailyGoalProgress.goalQuestionCount}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MistWhite,
+                    fontWeight = FontWeight.Black,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ShortcutCard(title: String, symbol: String, modifier: Modifier, onClick: () -> Unit) {
-    TechCard(modifier.clickable(onClick = onClick)) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite)
-            Box(Modifier.fillMaxWidth().height(72.dp), contentAlignment = Alignment.Center) {
-                Text(symbol, color = ElectricBlue, style = MaterialTheme.typography.displayMedium)
+private fun BrandPracticeShortcutCard(brands: List<Brand>, modifier: Modifier, onClick: () -> Unit) {
+    val logoBrands = remember(brands) {
+        brands.filter { BrandLogoRegistry.resourceIdFor(it.id) != null }.take(3)
+    }
+    TechCard(modifier.height(180.dp).clickable(onClick = onClick)) {
+        Box(Modifier.fillMaxSize().padding(16.dp)) {
+            Column(Modifier.fillMaxSize()) {
+                ShortcutCardTitle("\u54c1\u724c\u4e13\u9879")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "\u6309\u54c1\u724c\u7ec3\u4e60",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CyanGlow,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Box(Modifier.fillMaxWidth().weight(1f).offset(x = (-6).dp, y = (-10).dp), contentAlignment = Alignment.Center) {
+                    if (logoBrands.isEmpty()) {
+                        Text("\u54c1\u724c\u5e93", style = MaterialTheme.typography.titleMedium, color = CyanGlow, fontWeight = FontWeight.Bold)
+                    } else {
+                        val centeredLast = logoBrands.take(1) + logoBrands.drop(2) + logoBrands.drop(1).take(1)
+                        centeredLast.forEachIndexed { index, brand ->
+                            val xOffset = when (index) {
+                                0 -> (-32).dp
+                                1 -> 32.dp
+                                else -> 0.dp
+                            }
+                            BrandLogoTile(
+                                brand = brand,
+                                modifier = Modifier.size(48.dp).offset(x = xOffset),
+                                tileSizeDp = 48,
+                                cornerRadiusDp = 14,
+                                paddingDp = 6,
+                            )
+                        }
+                    }
+                }
+            }
+            Text("\u2192", modifier = Modifier.align(Alignment.BottomEnd), color = ElectricBlue, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+        }
+    }
+}
+
+@Composable
+private fun MistakeReviewShortcutCard(
+    mistakeReviewShortcut: MistakeReviewShortcutPresentation,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    val accent = if (mistakeReviewShortcut.hasPendingMistakes) ErrorPink else SuccessMint
+    TechCard(modifier.height(180.dp).clickable(onClick = onClick)) {
+        Box(Modifier.fillMaxSize().padding(16.dp)) {
+            Column(Modifier.fillMaxSize()) {
+                ShortcutCardTitle("\u9519\u9898\u590d\u76d8", reserveEndSpace = true)
+                Spacer(Modifier.height(4.dp))
+                if (mistakeReviewShortcut.hasPendingMistakes) {
+                    val pendingCount = mistakeReviewShortcut.headline.filter { it.isDigit() }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("\u5f85\u590d\u76d8 ", style = MaterialTheme.typography.bodySmall, color = CyanGlow, fontWeight = FontWeight.Bold)
+                        Text("$pendingCount \u9053", style = MaterialTheme.typography.bodySmall, color = ErrorPink, fontWeight = FontWeight.Black)
+                    }
+                } else {
+                    Text("\u6682\u65e0\u5f85\u590d\u76d8", style = MaterialTheme.typography.bodySmall, color = SuccessMint, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    mistakeReviewShortcut.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SoftBlue,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.weight(1f))
+                if (mistakeReviewShortcut.hasPendingMistakes) {
+                    ReviewQueuePreview()
+                }
+            }
+            Box(
+                Modifier.align(Alignment.TopEnd).size(42.dp).clip(androidx.compose.foundation.shape.CircleShape).background(accent.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(if (mistakeReviewShortcut.hasPendingMistakes) "!" else "\u2713", color = accent, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+            }
+            Text("\u2192", modifier = Modifier.align(Alignment.BottomEnd), color = ElectricBlue, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+        }
+    }
+}
+
+@Composable
+private fun ShortcutCardTitle(text: String, reserveEndSpace: Boolean = false) {
+    Box(Modifier.fillMaxWidth().height(30.dp), contentAlignment = Alignment.CenterStart) {
+        Text(
+            text,
+            modifier = if (reserveEndSpace) Modifier.padding(end = 46.dp) else Modifier,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MistWhite,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ReviewQueuePreview() {
+    val statusColors = listOf(CyanGlow, ErrorPink, ElectricBlue)
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        statusColors.forEach { color ->
+            Row(
+                modifier = Modifier.width(86.dp).height(12.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(5.dp))
+                    .background(CardNavyLight.copy(alpha = 0.86f))
+                    .border(1.dp, SoftBlue.copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(5.dp)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.padding(start = 5.dp).size(5.dp).clip(androidx.compose.foundation.shape.CircleShape).background(color))
+                Spacer(Modifier.width(5.dp))
+                Box(Modifier.width(42.dp).height(2.dp).background(SoftBlue.copy(alpha = 0.55f)))
             }
         }
     }
@@ -680,7 +864,25 @@ private fun BrandLogoTile(
 }
 
 @Composable
-private fun SettingsPage(insets: PaddingValues, onOpenPage: (String) -> Unit) {
+private fun SettingsPage(insets: PaddingValues, onOpenPage: (String) -> Unit, repository: CarRepository) {
+    var learningOverview by remember {
+        mutableStateOf(
+            LearningOverview.fromCompletedSessions(
+                sessions = emptyList(),
+                weekStartMillis = 0L,
+                pendingMistakeCount = 0,
+            ),
+        )
+    }
+    var learningOverviewLoadFailed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        runCatching { repository.learningOverview() }
+            .onSuccess {
+                learningOverview = it
+                learningOverviewLoadFailed = false
+            }
+            .onFailure { learningOverviewLoadFailed = true }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 20.dp),
         contentPadding = PaddingValues(top = 28.dp, bottom = 22.dp),
@@ -688,17 +890,55 @@ private fun SettingsPage(insets: PaddingValues, onOpenPage: (String) -> Unit) {
     ) {
         item { Text("我的学习", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Black, color = MistWhite) }
         item {
-            TechCard {
-                Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(56.dp).clip(androidx.compose.foundation.shape.CircleShape).background(HeroGradient), contentAlignment = Alignment.Center) { Text("车", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black) }
-                    Spacer(Modifier.width(14.dp))
-                    Column { Text("汽车品牌学习者", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite); Text("继续完成今天的 20 题挑战", color = SoftBlue) }
-                }
+            if (learningOverviewLoadFailed) {
+                EmptyCard("学习概览暂时无法读取，请稍后重新打开“我的学习”页面。")
+            } else {
+                LearningOverviewCard(learningOverview)
             }
         }
         item { SettingsEntry("学习记录", "查看每次练习结果", "▤") { onOpenPage("history") } }
         item { SettingsEntry("错题本", "复习易错车型和品牌", "◫") { onOpenPage("mistakes") } }
         item { SettingsEntry("题库管理", "新增或编辑自定义内容", "✦") { onOpenPage("manage") } }
+    }
+}
+
+@Composable
+private fun LearningOverviewCard(overview: LearningOverview) {
+    TechCard {
+        Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("本周学习概览", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite)
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text("累计完成 ", color = SoftBlue, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(bottom = 10.dp))
+                    Text("${overview.totalCompletedQuestionCount}", style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Black, color = ElectricBlue)
+                    Text(" 题", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite, modifier = Modifier.padding(bottom = 10.dp))
+                }
+                Text("本周完成 ${overview.weeklyCompletedSessionCount} 次练习", color = SoftBlue, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (overview.pendingMistakeCount == 0) "暂无错题待复习" else "待复习 ${overview.pendingMistakeCount} 道错题",
+                    color = if (overview.pendingMistakeCount == 0) SuccessMint else SoftBlue,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Box(Modifier.size(82.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    progress = { overview.correctRatePercent / 100f },
+                    modifier = Modifier.fillMaxSize(),
+                    color = CyanGlow,
+                    trackColor = CardNavyLight,
+                    strokeWidth = 7.dp,
+                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        if (overview.totalCompletedQuestionCount == 0) "--" else "${overview.correctRatePercent}%",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MistWhite,
+                        fontWeight = FontWeight.Black,
+                    )
+                    Text("正确率", style = MaterialTheme.typography.labelSmall, color = SoftBlue)
+                }
+            }
+        }
     }
 }
 
@@ -716,26 +956,290 @@ private fun SettingsEntry(title: String, subtitle: String, symbol: String, onCli
 
 @Composable
 private fun RecordsScreen(title: String, insets: PaddingValues, onBack: () -> Unit, load: suspend () -> List<QuizSessionEntity>) {
-    var records by remember { mutableStateOf<List<QuizSessionEntity>>(emptyList()) }
-    LaunchedEffect(Unit) { records = load() }
+    val zoneId = ZoneId.systemDefault()
+    val today = LocalDate.now(zoneId)
+    var history by remember { mutableStateOf<List<LearningDaySummary>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        val completedSessions = load().mapNotNull { record ->
+            record.finishedAt?.let { finishedAt ->
+                CompletedPracticeSession(
+                    mode = record.mode,
+                    totalQuestionCount = record.totalCount,
+                    correctQuestionCount = record.correctCount,
+                    finishedAtMillis = finishedAt,
+                )
+            }
+        }
+        history = LearningHistory.fromCompletedSessions(
+            sessions = completedSessions,
+            today = today,
+            zoneId = zoneId,
+        )
+    }
+    val nonEmptyDays = history.asReversed().filter { it.completedQuestionCount > 0 }
     TechListPage(title, insets, onBack) {
-        if (records.isEmpty()) item { EmptyCard("还没有完成的练习记录。") }
-        items(records.size) { index ->
-            val record = records[index]
-            TechCard { Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text("${record.correctCount}/${record.totalCount}", color = CyanGlow, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black); Spacer(Modifier.width(14.dp)); Column { Text("练习成绩", fontWeight = FontWeight.Bold); Text(record.mode, color = SoftBlue, style = MaterialTheme.typography.bodySmall) } } }
+        item {
+            Text(
+                "近 7 日学习轨迹",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MistWhite,
+            )
+        }
+        item { LearningHeatmap(history) }
+        if (history.isNotEmpty() && nonEmptyDays.isEmpty()) {
+            item { EmptyCard("近 7 日还没有完成的练习记录。") }
+        }
+        items(nonEmptyDays, key = { it.date }) { summary ->
+            LearningDayCard(summary, today, zoneId)
         }
     }
 }
 
 @Composable
-private fun MistakesScreen(insets: PaddingValues, onBack: () -> Unit, load: suspend () -> List<MistakeEntity>) {
+private fun LearningHeatmap(history: List<LearningDaySummary>) {
+    TechCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            history.forEach { summary ->
+                Column(
+                    modifier = Modifier.weight(1f).height(82.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(heatColor(summary.heatLevel))
+                        .padding(vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(chineseWeekday(summary.date), color = MistWhite, style = MaterialTheme.typography.labelSmall)
+                    Text("${summary.date.dayOfMonth}", color = MistWhite, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                    Text(
+                        compactHeatmapCount(summary.completedQuestionCount),
+                        color = SoftBlue,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun compactHeatmapCount(completedQuestionCount: Long): String = when {
+    completedQuestionCount == 0L -> "—"
+    completedQuestionCount < 1_000L -> completedQuestionCount.toString()
+    completedQuestionCount < 10_000L -> {
+        val tenthsOfThousands = completedQuestionCount / 100L
+        "${tenthsOfThousands / 10}.${tenthsOfThousands % 10}k"
+    }
+    else -> "≥1万"
+}
+
+@Composable
+private fun LearningDayCard(summary: LearningDaySummary, today: LocalDate, zoneId: ZoneId) {
+    TechCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(historyDateTitle(summary.date, today), color = MistWhite, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("完成 ${summary.completedQuestionCount} 题", color = CyanGlow, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+            Text(
+                "正确率 ${summary.correctRatePercent?.let { "$it%" } ?: "--"} · ${summary.sessionCount} 次练习",
+                color = SoftBlue,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            summary.sessions.forEach { session ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        practiceModeLabel(session.mode),
+                        modifier = Modifier.weight(1f),
+                        color = MistWhite,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text("${session.correctQuestionCount}/${session.totalQuestionCount}", color = CyanGlow, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        Instant.ofEpochMilli(session.finishedAtMillis).atZone(zoneId).format(HistoryTimeFormatter),
+                        color = SoftBlue,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun heatColor(heatLevel: HeatLevel): Color = when (heatLevel) {
+    HeatLevel.NONE -> CardNavyLight.copy(alpha = 0.55f)
+    HeatLevel.LOW -> ElectricBlue.copy(alpha = 0.45f)
+    HeatLevel.MEDIUM -> ElectricBlue.copy(alpha = 0.75f)
+    HeatLevel.HIGH -> CyanGlow.copy(alpha = 0.85f)
+}
+
+private fun chineseWeekday(date: LocalDate): String = when (date.dayOfWeek.value) {
+    1 -> "周一"
+    2 -> "周二"
+    3 -> "周三"
+    4 -> "周四"
+    5 -> "周五"
+    6 -> "周六"
+    else -> "周日"
+}
+
+private fun historyDateTitle(date: LocalDate, today: LocalDate): String =
+    "${if (date == today) "今天" else chineseWeekday(date)} · ${date.format(HistoryDateFormatter)}"
+
+private fun practiceModeLabel(mode: String): String = when (mode) {
+    "Random" -> "随机练习"
+    "BrandPractice" -> "品牌专项"
+    else -> mode
+}
+
+private val HistoryDateFormatter = DateTimeFormatter.ofPattern("M月d日")
+private val HistoryTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+@Composable
+private fun MistakesScreen(
+    brands: List<Brand>,
+    insets: PaddingValues,
+    onBack: () -> Unit,
+    load: suspend () -> List<MistakeEntity>,
+    onOpenDetail: (MistakePresentation) -> Unit,
+) {
     var records by remember { mutableStateOf<List<MistakeEntity>>(emptyList()) }
     LaunchedEffect(Unit) { records = load() }
+    val presentations = records.mapNotNull { MistakePresentationMapper.from(it, brands) }
+    val unavailableCount = records.size - presentations.size
     TechListPage("错题本", insets, onBack) {
         if (records.isEmpty()) item { EmptyCard("暂时没有错题，继续保持！") }
-        items(records.size) { index ->
-            val item = records[index]
-            TechCard { Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text("!", color = ErrorPink, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black); Spacer(Modifier.width(14.dp)); Column { Text(item.carId, fontWeight = FontWeight.Bold); Text("${item.questionType} · 错误 ${item.wrongCount} 次", color = SoftBlue, style = MaterialTheme.typography.bodySmall) } } }
+        if (presentations.isNotEmpty()) {
+            item {
+                Text(
+                    "共 ${presentations.size} 道错题 · 累计错误 ${presentations.sumOf { it.wrongCount }} 次",
+                    color = SoftBlue,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+        items(presentations, key = { it.key }) { item ->
+            TechCard(Modifier.fillMaxWidth().clickable { onOpenDetail(item) }) {
+                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val brand = brands.firstOrNull { it.id == item.brandId }
+                    if (brand != null) {
+                        BrandLogoTile(
+                            brand = brand,
+                            modifier = Modifier.size(46.dp),
+                            tileSizeDp = 46,
+                            cornerRadiusDp = 15,
+                            paddingDp = 6,
+                        )
+                    } else {
+                        Box(
+                            Modifier.size(46.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(15.dp))
+                                .background(CardNavyLight).border(1.dp, SoftBlue.copy(alpha = 0.45f), androidx.compose.foundation.shape.RoundedCornerShape(15.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("\u8f66", color = SoftBlue, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                        }
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(item.listTitle, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite)
+                        Text(item.questionTypeLabel, color = SoftBlue, style = MaterialTheme.typography.bodySmall)
+                        Text("正确答案：${item.correctAnswer}", color = CyanGlow, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("错 ${item.wrongCount} 次", color = ErrorPink, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text("›", color = SoftBlue, style = MaterialTheme.typography.headlineMedium)
+                    }
+                }
+            }
+        }
+        if (unavailableCount > 0) {
+            item { EmptyCard("有 $unavailableCount 道错题对应的题库内容已删除，暂时无法查看详情。") }
+        }
+    }
+}
+
+@Composable
+private fun MistakeDetailScreen(
+    mistake: MistakePresentation,
+    brands: List<Brand>,
+    insets: PaddingValues,
+    onBack: () -> Unit,
+) {
+    val brand = brands.firstOrNull { it.id == mistake.brandId }
+    TechListPage("错题详情", insets, onBack) {
+        item {
+            TechCard {
+                Box(Modifier.fillMaxWidth().padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(end = 60.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (brand != null) {
+                            BrandLogoTile(
+                                brand = brand,
+                                modifier = Modifier.size(64.dp),
+                                tileSizeDp = 64,
+                                cornerRadiusDp = 18,
+                                paddingDp = 8,
+                            )
+                        } else {
+                            Box(
+                                Modifier.size(64.dp)
+                                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(18.dp))
+                                    .background(CardNavyLight)
+                                    .border(1.dp, SoftBlue.copy(alpha = 0.45f), androidx.compose.foundation.shape.RoundedCornerShape(18.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("车", color = SoftBlue, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                            }
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("本题复盘", color = CyanGlow, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                            Text(mistake.brandName, color = MistWhite, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                            Text(mistake.questionTypeLabel, color = SoftBlue, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Box(
+                        Modifier.align(Alignment.TopEnd)
+                            .size(52.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .background(ErrorPink.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("${mistake.wrongCount}", color = ErrorPink, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                            Text("次", color = ErrorPink, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            TechCard {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text("题目", color = SoftBlue, style = MaterialTheme.typography.bodyMedium)
+                    Text(mistake.question, color = MistWhite, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(SoftBlue.copy(alpha = 0.25f)))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(28.dp)
+                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                .background(SuccessMint.copy(alpha = 0.18f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("✓", color = SuccessMint, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text("正确答案", color = SuccessMint, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                    Text(
+                        mistake.correctAnswer,
+                        color = SuccessMint,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Black,
+                    )
+                }
+            }
         }
     }
 }

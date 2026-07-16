@@ -30,6 +30,9 @@ interface QuizDao {
     @Insert suspend fun insertSession(item: QuizSessionEntity): Long
     @Insert suspend fun insertAnswer(item: AnswerEntity)
     @Query("SELECT * FROM quiz_sessions ORDER BY startedAt DESC") suspend fun getHistory(): List<QuizSessionEntity>
+    @Query("SELECT * FROM quiz_sessions WHERE finishedAt IS NOT NULL ORDER BY finishedAt DESC") suspend fun getCompletedHistory(): List<QuizSessionEntity>
+    @Query("SELECT COALESCE(SUM(totalCount), 0) FROM quiz_sessions WHERE finishedAt IS NOT NULL AND finishedAt >= :dayStartMillis AND finishedAt < :nextDayStartMillis")
+    suspend fun completedQuestionCountBetween(dayStartMillis: Long, nextDayStartMillis: Long): Int
     @Query("SELECT * FROM mistakes ORDER BY lastWrongAt DESC") suspend fun getMistakes(): List<MistakeEntity>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertMistake(item: MistakeEntity)
     @Query("UPDATE quiz_sessions SET correctCount = :correctCount, finishedAt = :finishedAt WHERE id = :id") suspend fun finishSession(id: Long, correctCount: Int, finishedAt: Long)

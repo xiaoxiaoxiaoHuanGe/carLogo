@@ -20,13 +20,13 @@ class QuizGenerator(private val random: Random = Random.Default) {
         brands: List<Brand>,
         randomQuestionCount: Int = RandomPracticeConfig.DEFAULT_QUESTION_COUNT,
     ): List<Question> {
-        require(brands.size >= OPTION_COUNT) { "题库至少需要 4 个品牌才能生成四选一题目。" }
-        require(brands.all { it.cars.isNotEmpty() }) { "每个参与出题的品牌至少需要 1 款车型。" }
+        val quizEligibleBrands = brands.filter { it.cars.isNotEmpty() }
+        require(quizEligibleBrands.size >= OPTION_COUNT) { "题库至少需要 4 个含车型的品牌才能生成四选一题目。" }
 
         val targetBrands = when (mode) {
-            QuizMode.Random -> brands
+            QuizMode.Random -> quizEligibleBrands
             is QuizMode.BrandPractice -> listOf(
-                brands.firstOrNull { it.id == mode.brandId }
+                quizEligibleBrands.firstOrNull { it.id == mode.brandId }
                     ?: throw IllegalArgumentException("未找到品牌专项练习所需的品牌：${mode.brandId}"),
             )
         }
@@ -68,13 +68,13 @@ class QuizGenerator(private val random: Random = Random.Default) {
                     index = index,
                     targetBrand = targetBrand,
                     targetCar = targetCar,
-                    allBrands = brands,
+                    allBrands = quizEligibleBrands,
                 )
                 QuestionType.ModelToBrand -> createModelToBrandQuestion(
                     index = index,
                     targetBrand = targetBrand,
                     targetCar = targetCar,
-                    allBrands = brands,
+                    allBrands = quizEligibleBrands,
                 )
             }
         }

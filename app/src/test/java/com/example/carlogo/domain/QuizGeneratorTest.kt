@@ -93,6 +93,44 @@ class QuizGeneratorTest {
     }
 
     @Test
+    fun `random round ignores an empty custom brand`() {
+        val brandsWithEmptyCustomBrand = brands + Brand(
+            id = "custom-empty",
+            nameZh = "空品牌",
+            nameEn = "Empty brand",
+            cars = emptyList(),
+            isBuiltIn = false,
+        )
+
+        val questions = QuizGenerator(Random(23)).createRound(
+            mode = QuizMode.Random,
+            brands = brandsWithEmptyCustomBrand,
+        )
+
+        assertEquals(10, questions.size)
+        assertTrue(questions.none { it.targetBrandId == "custom-empty" })
+    }
+
+    @Test
+    fun `brand practice works when another brand has no cars`() {
+        val brandsWithEmptyCustomBrand = brands + Brand(
+            id = "custom-empty",
+            nameZh = "空品牌",
+            nameEn = "Empty brand",
+            cars = emptyList(),
+            isBuiltIn = false,
+        )
+
+        val questions = QuizGenerator(Random(29)).createRound(
+            mode = QuizMode.BrandPractice("brand-3"),
+            brands = brandsWithEmptyCustomBrand,
+        )
+
+        assertTrue(questions.isNotEmpty())
+        assertTrue(questions.all { it.targetBrandId == "brand-3" })
+    }
+
+    @Test
     fun `question prompt wraps english brand name and options have unique labels`() {
         val questions = QuizGenerator(Random(2)).createRound(QuizMode.Random, brands)
         val brandQuestion = questions.first { it.type == QuestionType.BrandToModel }
