@@ -147,6 +147,15 @@ internal object ManagementBrandLogoPresentation {
     const val BRAND_NAME_MAX_LINES = 1
 }
 
+internal object BrandHubPresentation {
+    const val HOME_NAV_LABEL = "首页"
+    const val BRAND_NAV_LABEL = "品牌"
+    const val LEARNING_RECORD_SHORTCUT_LABEL = "学习记录"
+    const val MISTAKE_RECORD_LABEL = "错题记录"
+    const val START_PRACTICE_LABEL = "开始练习"
+    const val ALL_MODELS_LABEL = "全部车型"
+}
+
 @Composable
 fun CarLogoApp() {
     val context = LocalContext.current
@@ -270,11 +279,15 @@ private fun MainShell(
     onOpenPage: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var managingBrandId by remember { mutableStateOf<String?>(null) }
+    var selectedBrandId by remember { mutableStateOf<String?>(null) }
     var selectedMistake by remember { mutableStateOf<MistakePresentation?>(null) }
     var dailyGoalProgress by remember { mutableStateOf(DailyGoalProgress.fromCompletedQuestionCount(0)) }
     var mistakeReviewShortcut by remember { mutableStateOf(MistakeReviewShortcutPresentation.fromPendingMistakeCount(0)) }
-    val selectedTab = if (page in listOf("random", "special", "settings")) page else "settings"
+    val selectedTab = when (page) {
+        "random", "special", "settings" -> page
+        "brandDetail" -> "special"
+        else -> "settings"
+    }
     LaunchedEffect(page) {
         if (page == "random") {
             dailyGoalProgress = DailyGoalProgress.fromCompletedQuestionCount(repository.todayCompletedQuestionCount())
@@ -286,8 +299,8 @@ private fun MainShell(
             containerColor = Color.Transparent,
             bottomBar = {
                 NavigationBar(containerColor = DeepNavy.copy(alpha = 0.96f)) {
-                    TechNavItem("练习", "◉", selectedTab == "random") { onOpenPage("random") }
-                    TechNavItem("专项", "◇", selectedTab == "special") { onOpenPage("special") }
+                    TechNavItem(BrandHubPresentation.HOME_NAV_LABEL, "◉", selectedTab == "random") { onOpenPage("random") }
+                    TechNavItem(BrandHubPresentation.BRAND_NAV_LABEL, "◇", selectedTab == "special") { onOpenPage("special") }
                     TechNavItem("我的", "◎", selectedTab == "settings") { onOpenPage("settings") }
                 }
             },
@@ -305,7 +318,12 @@ private fun MainShell(
                     onOpenPage = onOpenPage,
                     insets = insets,
                 )
-                "special" -> BrandPracticePage(brands, onStart, insets)
+                "special" -> BrandPracticePage(
+                    brands = brands,
+                    insets = insets,
+                    onOpenBrandDetail = { brandId -> selectedBrandId = brandId; onOpenPage("brandDetail") },
+                    onAddBrand = { zh, en -> scope.launch { repository.addBrand(zh, en, "自定义"); onBrandsChanged() } },
+                )
                 "history" -> RecordsScreen("学习记录", insets, { onOpenPage("settings") }) { repository.history() }
                 "mistakes" -> MistakesScreen(
                     brands = brands,
@@ -323,32 +341,26 @@ private fun MainShell(
                         MistakeDetailScreen(mistake, brands, insets) { onOpenPage("mistakes") }
                     } else {
                         TechListPage("错题详情", insets, { onOpenPage("mistakes") }) {
-                            item { EmptyCard("未找到这道错题，请返回错题本重新选择。") }
+                            item { EmptyCard("未找到这道错题，请返回错题记录重新选择。") }
                         }
                     }
                 }
-                "manage" -> ManagementScreen(
-                    brands = brands,
-                    insets = insets,
-                    onBack = { onOpenPage("settings") },
-                    onOpenBrandDetail = { brandId -> managingBrandId = brandId; onOpenPage("manageDetail") },
-                    onAddBrand = { zh, en -> scope.launch { repository.addBrand(zh, en, "自定义"); onBrandsChanged() } },
-                    onDeleteBrand = { id -> scope.launch { repository.deleteCustomBrand(id); onBrandsChanged() } },
-                    onUpdateBrand = { id, zh, en -> scope.launch { repository.updateCustomBrand(id, zh, en, "自定义"); onBrandsChanged() } },
-                )
-                "manageDetail" -> {
-                    val selectedBrand = brands.firstOrNull { it.id == managingBrandId }
+                "brandDetail" -> {
+                    val selectedBrand = brands.firstOrNull { it.id == selectedBrandId }
                     if (selectedBrand != null) {
                         BrandDetailManagementScreen(
                             brand = selectedBrand,
                             insets = insets,
-                            onBack = { onOpenPage("manage") },
+                            onBack = { onOpenPage("special") },
+                            onStart = onStart,
                             onAddCar = { brandId, zh, en, image -> scope.launch { repository.addCar(brandId, zh, en, image); onBrandsChanged() } },
                             onDeleteCar = { id -> scope.launch { repository.deleteCustomCar(id); onBrandsChanged() } },
                             onUpdateCar = { id, brandId, zh, en, image -> scope.launch { repository.updateCustomCar(id, brandId, zh, en, image); onBrandsChanged() } },
+                            onUpdateBrand = { id, zh, en -> scope.launch { repository.updateCustomBrand(id, zh, en, "自定义"); onBrandsChanged() } },
+                            onDeleteBrand = { id -> scope.launch { repository.deleteCustomBrand(id); onBrandsChanged(); onOpenPage("special") } },
                         )
                     } else {
-                        TechListPage("题库管理", insets, { onOpenPage("manage") }) {
+                        TechListPage(BrandHubPresentation.BRAND_NAV_LABEL, insets, { onOpenPage("special") }) {
                             item { EmptyCard("未找到该品牌，请返回品牌列表重新选择。") }
                         }
                     }
@@ -441,7 +453,7 @@ private fun RandomPracticePage(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                BrandPracticeShortcutCard(brands, Modifier.weight(1f)) { onOpenPage("special") }
+                BrandPracticeShortcutCard(brands, Modifier.weight(1f)) { onOpenPage("history") }
                 MistakeReviewShortcutCard(mistakeReviewShortcut, Modifier.weight(1f)) { onOpenPage("mistakes") }
             }
         }
@@ -525,10 +537,10 @@ private fun BrandPracticeShortcutCard(brands: List<Brand>, modifier: Modifier, o
     TechCard(modifier.height(180.dp).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxSize().padding(16.dp)) {
             Column(Modifier.fillMaxSize()) {
-                ShortcutCardTitle("\u54c1\u724c\u4e13\u9879")
+                ShortcutCardTitle(BrandHubPresentation.LEARNING_RECORD_SHORTCUT_LABEL)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "\u6309\u54c1\u724c\u7ec3\u4e60",
+                    "\u67e5\u770b\u6bcf\u6b21\u7ec3\u4e60\u7ed3\u679c",
                     style = MaterialTheme.typography.bodySmall,
                     color = CyanGlow,
                     maxLines = 1,
@@ -642,9 +654,17 @@ private fun ReviewQueuePreview() {
 }
 
 @Composable
-private fun BrandPracticePage(brands: List<Brand>, onStart: (QuizMode) -> Unit, insets: PaddingValues) {
+private fun BrandPracticePage(
+    brands: List<Brand>,
+    insets: PaddingValues,
+    onOpenBrandDetail: (String) -> Unit,
+    onAddBrand: (String, String) -> Unit,
+) {
     var query by remember { mutableStateOf("") }
     var categoryExpanded by remember { mutableStateOf(false) }
+    var showBrandEditor by remember { mutableStateOf(false) }
+    var brandZh by remember { mutableStateOf("") }
+    var brandEn by remember { mutableStateOf("") }
     val brandNameTextMeasurer = rememberTextMeasurer(cacheSize = 256)
     val categories = (SeedData.categoryOrder + brands.map { it.category }.distinct().filter { it !in SeedData.categoryOrder })
         .filter { category -> brands.any { it.category == category } }
@@ -721,6 +741,8 @@ private fun BrandPracticePage(brands: List<Brand>, onStart: (QuizMode) -> Unit, 
                 leadingIcon = { Text("⌕", style = MaterialTheme.typography.headlineSmall) },
             )
         }
+        Spacer(Modifier.height(12.dp))
+        TechButton("新增品牌", { showBrandEditor = true }, true, Modifier.fillMaxWidth())
         Spacer(Modifier.height(16.dp))
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
@@ -729,7 +751,19 @@ private fun BrandPracticePage(brands: List<Brand>, onStart: (QuizMode) -> Unit, 
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             items(filtered, key = { brand -> brand.id }) { brand ->
-                BrandCard(brand, brandNameTextMeasurer) { onStart(QuizMode.BrandPractice(brand.id)) }
+                BrandCard(brand, brandNameTextMeasurer) { onOpenBrandDetail(brand.id) }
+            }
+        }
+    }
+    if (showBrandEditor) {
+        Dialog(onDismissRequest = { showBrandEditor = false }) {
+            TechCard(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("新增品牌", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, color = MistWhite)
+                    OutlinedTextField(brandZh, { brandZh = it }, label = { Text("品牌中文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(brandEn, { brandEn = it }, label = { Text("品牌英文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    TechButton("保存品牌", { onAddBrand(brandZh, brandEn); brandZh = ""; brandEn = ""; showBrandEditor = false }, brandZh.isNotBlank(), Modifier.fillMaxWidth())
+                }
             }
         }
     }
@@ -897,8 +931,7 @@ private fun SettingsPage(insets: PaddingValues, onOpenPage: (String) -> Unit, re
             }
         }
         item { SettingsEntry("学习记录", "查看每次练习结果", "▤") { onOpenPage("history") } }
-        item { SettingsEntry("错题本", "复习易错车型和品牌", "◫") { onOpenPage("mistakes") } }
-        item { SettingsEntry("题库管理", "新增或编辑自定义内容", "✦") { onOpenPage("manage") } }
+        item { SettingsEntry(BrandHubPresentation.MISTAKE_RECORD_LABEL, "复习易错车型和品牌", "◫") { onOpenPage("mistakes") } }
     }
 }
 
@@ -1106,7 +1139,7 @@ private fun MistakesScreen(
     LaunchedEffect(Unit) { records = load() }
     val presentations = records.mapNotNull { MistakePresentationMapper.from(it, brands) }
     val unavailableCount = records.size - presentations.size
-    TechListPage("错题本", insets, onBack) {
+    TechListPage(BrandHubPresentation.MISTAKE_RECORD_LABEL, insets, onBack) {
         if (records.isEmpty()) item { EmptyCard("暂时没有错题，继续保持！") }
         if (presentations.isNotEmpty()) {
             item {
@@ -1352,14 +1385,20 @@ private fun BrandDetailManagementScreen(
     brand: Brand,
     insets: PaddingValues,
     onBack: () -> Unit,
+    onStart: (QuizMode) -> Unit,
     onAddCar: (String, String, String, String?) -> Unit,
     onDeleteCar: (String) -> Unit,
     onUpdateCar: (String, String, String, String, String?) -> Unit,
+    onUpdateBrand: (String, String, String) -> Unit,
+    onDeleteBrand: (String) -> Unit,
 ) {
     var showEditor by remember { mutableStateOf(false) }
+    var showBrandEditor by remember { mutableStateOf(false) }
     var editingCar by remember { mutableStateOf<CarModel?>(null) }
     var carZh by remember { mutableStateOf("") }
     var carEn by remember { mutableStateOf("") }
+    var brandZh by remember { mutableStateOf(brand.nameZh) }
+    var brandEn by remember { mutableStateOf(brand.nameEn) }
     fun openEditor(car: CarModel? = null) {
         editingCar = car
         carZh = car?.nameZh.orEmpty()
@@ -1379,11 +1418,19 @@ private fun BrandDetailManagementScreen(
                 Text("${brand.cars.size} 款车型", color = SoftBlue, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Spacer(Modifier.height(14.dp))
+        if (!brand.isBuiltIn) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Text("编辑品牌", color = CyanGlow, modifier = Modifier.padding(end = 16.dp).clickable { showBrandEditor = true })
+                Text("删除品牌", color = ErrorPink, modifier = Modifier.clickable { onDeleteBrand(brand.id) })
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+        TechButton(BrandHubPresentation.START_PRACTICE_LABEL, { onStart(QuizMode.BrandPractice(brand.id)) }, brand.cars.isNotEmpty(), Modifier.fillMaxWidth())
+        Spacer(Modifier.height(12.dp))
         TechButton("新增车型", { openEditor() }, true, Modifier.fillMaxWidth())
         Spacer(Modifier.height(14.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 22.dp)) {
-            item { Text("车型列表", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite) }
+            item { Text("${BrandHubPresentation.ALL_MODELS_LABEL}（${brand.cars.size}）", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MistWhite) }
             if (brand.cars.isEmpty()) item { EmptyCard("该品牌还没有车型，点击上方“新增车型”开始添加。") }
             items(brand.cars.size) { index ->
                 val car = brand.cars[index]
@@ -1416,6 +1463,18 @@ private fun BrandDetailManagementScreen(
                         showEditor = false
                     }, carZh.isNotBlank(), Modifier.fillMaxWidth())
                     Text("取消", color = SoftBlue, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().clickable { showEditor = false }.padding(8.dp))
+                }
+            }
+        }
+    }
+    if (showBrandEditor) {
+        Dialog(onDismissRequest = { showBrandEditor = false }) {
+            TechCard(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("编辑品牌", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, color = MistWhite)
+                    OutlinedTextField(brandZh, { brandZh = it }, label = { Text("品牌中文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(brandEn, { brandEn = it }, label = { Text("品牌英文名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    TechButton("保存品牌", { onUpdateBrand(brand.id, brandZh, brandEn); showBrandEditor = false }, brandZh.isNotBlank(), Modifier.fillMaxWidth())
                 }
             }
         }
